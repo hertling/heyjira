@@ -1,0 +1,140 @@
+#!/usr/bin/ruby
+
+require 'rubygems'
+require 'jira-ruby'
+require 'optparse'
+require 'yaml'
+
+def pretty_print_issue(issue)
+  # puts issue.to_yaml
+  puts "#{issue.summary} [#{issue.key}]" #["summary"]}"
+  if issue.assignee
+    puts "Assigned to: #{issue.assignee.key}" #["assignee"]}"
+  end
+end
+
+jira_options = {
+  :username     => ENV["JIRA_USER"],
+  :password     => ENV["JIRA_SECRET"],
+  :site         => ENV["JIRA_URL"],
+  :context_path => '',
+  :auth_type    => :basic
+}
+
+$client = JIRA::Client.new(jira_options)
+$project = $client.Project.find('SW3D')
+
+Options = Struct.new(:name)
+
+def go_to_state(desired_transition)
+  available_transitions = $client.Transition.all(:issue => $issue)
+  matching_trans = available_transitions.select {|ea| ea.name.downcase == desired_transition.downcase }
+  if matching_trans.size == 0
+    avail_stats = available_transitions.collect {|ea| ea.name.downcase }
+    puts "Sorry, can't move issue to state '#{desired_transition}'. Available states are: #{avail_stats.join(",")}"
+    exit
+  elsif matching_trans.size > 1
+    puts "Internal error. Multiple states matched '#{desired_transition}'."
+    puts "Available states:"
+    available_transitions.each {|ea| puts "#{ea.name.downcase} (id: #{ea.id})" }
+    exit
+  else
+    begin
+      transition_id = matching_trans.first.id
+      transition = $issue.transitions.build
+      transition.save!("transition" => {"id" => transition_id})
+      puts "Moved issue #{$issue.key} to state #{desired_transition}!"
+    rescue JIRA::HTTPError => e
+      puts e.response.code
+      puts e.response.message
+      puts e.response.body
+    end
+  end
+end
+
+class Parser
+  def self.parse(options)
+    args = Options.new("world")
+
+    opt_parser = OptionParser.new do |opts|
+      opts.banner = "Usage: jira-cli.rb [options]"
+
+      opts.on("-1", "--plist", "List all *projects*") do
+        $client.Project.all.each do |project|
+          puts "#{project.key}: #{project.name}"
+        end
+        puts "Hint: Use all-caps project key with -p option"
+      end
+
+      opts.on("-p", "--project PROJECT", "Select project to use") do |proj|
+        puts "Using project #{proj}"
+        $project = $client.Project.find(proj)
+      end
+
+      opts.on("-l", "--list", "List all *issues*") do
+        $project.issues.each do |issue|
+          puts "#{issue.key} - #{issue.summary}"
+        end
+      end
+
+      opts.on("-i", "--issue ISSUE", "Select an existing issue with issue KEY") do |issue_term|
+        $issue = $client.Issue.find(issue_term)
+        if $issue
+          pretty_print_issue($issue)
+        else
+          puts "Couldn't find issue with term #{issue_term}. Exiting."
+          exit
+        end
+      end
+
+      opts.on("-c", "--create SUMMARY", "Create an issue") do |summary|
+        story_type_id = $project.issueTypes.select { |it| it["name"]=="Story" }.first["id"]
+        $issue = $client.Issue.build
+        $issue.save({"fields"=>{"summary"=>summary,
+                               "project"=>{"id"=>$project.id},
+                               "issuetype"=>{"id"=>story_type_id}}})
+        $issue.fetch
+
+        puts "Issue Created!"
+        pretty_print_issue($issue)
+      end
+
+      opts.on("-s", "--start", "Start the selected or created issue") do
+        if $issue
+          go_to_state("start")
+        else
+          puts "The start command requires an issue (e.g. combine with --issue or --create). Exiting."
+          exit
+        end
+      end
+
+      opts.on("", "--state STATE", "Move the selected or created issue to the desired state") do |state|
+        if $issue
+          go_to_state(state)
+        else
+          puts "The start command requires an issue (e.g. combine with --issue or --create). Exiting."
+          exit
+        end
+      end
+
+      opts.on("-x", "--experiment", "Do some experimental stuff") do
+        $project.issues[0..0].each do |issue|
+          puts issue.to_yaml
+        end
+      end
+
+      opts.on("-h", "--help", "Prints this help") do
+        puts opts
+        exit
+      end
+    end
+
+    opt_parser.parse!(options)
+    return args
+  end
+end
+
+cmdline = ARGV
+cmdline = ["--help"] if ARGV.size==0
+options = Parser.parse cmdline
+
